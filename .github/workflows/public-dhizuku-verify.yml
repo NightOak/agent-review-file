@@ -1,0 +1,16 @@
+name: Verify public Dhizuku script
+
+on:
+  push:
+    branches:
+      - public-dhizuku-device-owner-test-20260914
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: SHA-256
+        run: |
+          sha256sum public/dhizuku-device-owner-test.sh
+          test "$(sha256sum public/dhizuku-device-owner-test.sh | awk '{print $1}')" = "a0d544c824ca453b7cde986571d0c58cc7c93efe14335235549f7554caa0ffb0"
