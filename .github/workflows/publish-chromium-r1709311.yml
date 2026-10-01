@@ -1,0 +1,97 @@
+name: publish-verified-chromium-r1709311
+
+on:
+  push:
+    branches:
+      - chromium-release-r1709311
+    paths:
+      - .github/workflows/publish-chromium-r1709311.yml
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      REV: "1709311"
+      VERSION: "157.0.8083.0"
+      VERSION_CODE: "808300004"
+      ARCHIVE_SHA256: "10648a4be653886c5e88278838c38d9e574e33faae1fb09417d74e083ae0f453"
+      APK_SHA256: "85664c4845e72743484029f1100c60be67ce079ddef70ab46d524f058cd8f96b"
+      APK_SIZE: "384387707"
+      SIGNER_SHA256: "32a2fc74d731105859e5a85df16d95f102d85b22099b8064c5d8915c61dad1e0"
+      TAG: "chromium-android-arm64-r1709311"
+    steps:
+      - name: Acquire and verify pinned official Chromium APK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          BASE="https://storage.googleapis.com/chromium-browser-snapshots/Android_Arm64"
+          MEMBER="chrome-android/apks/ChromePublic.apk"
+          mkdir -p out work
+
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 30 --max-time 1200 --retry 3 --retry-all-errors \
+            --output work/chrome-android.zip "$BASE/$REV/chrome-android.zip"
+
+          echo "$ARCHIVE_SHA256  work/chrome-android.zip" | sha256sum -c -
+          unzip -tqq work/chrome-android.zip
+          if unzip -Z1 work/chrome-android.zip | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+            echo "unsafe archive path" >&2
+            exit 20
+          fi
+          test "$(unzip -Z1 work/chrome-android.zip | grep -Fxc "$MEMBER")" -eq 1
+          unzip -p work/chrome-android.zip "$MEMBER" > out/Chromium-ChromePublic.apk
+          test "$(stat -c '%s' out/Chromium-ChromePublic.apk)" = "$APK_SIZE"
+          echo "$APK_SHA256  out/Chromium-ChromePublic.apk" | sha256sum -c -
+
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt -perm -111 | sort -V | tail -n1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -perm -111 | sort -V | tail -n1)"
+          "$AAPT" dump badging out/Chromium-ChromePublic.apk > out/aapt-badging.txt
+          grep -Fq "package: name='org.chromium.chrome'" out/aapt-badging.txt
+          grep -Fq "versionCode='$VERSION_CODE'" out/aapt-badging.txt
+          grep -Fq "versionName='$VERSION'" out/aapt-badging.txt
+
+          "$APKSIGNER" verify --verbose --print-certs out/Chromium-ChromePublic.apk > out/apksigner-verify.txt 2>&1
+          GOT_SIGNER="$(awk -F': ' '/certificate SHA-256 digest:/ {print tolower($NF); exit}' out/apksigner-verify.txt | tr -d '\r')"
+          test "$GOT_SIGNER" = "$SIGNER_SHA256"
+
+          cat > out/manifest.txt <<EOF
+source=https://storage.googleapis.com/chromium-browser-snapshots/Android_Arm64/$REV/chrome-android.zip
+revision=$REV
+version=$VERSION
+version_code=$VERSION_CODE
+archive_sha256=$ARCHIVE_SHA256
+apk_file=Chromium-ChromePublic.apk
+apk_size=$APK_SIZE
+apk_sha256=$APK_SHA256
+package=org.chromium.chrome
+signer_sha256=$SIGNER_SHA256
+github_repository=$GITHUB_REPOSITORY
+github_commit=$GITHUB_SHA
+EOF
+
+      - name: Publish immutable GitHub release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release already exists; refusing overwrite" >&2
+            exit 30
+          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Verified Chromium Android Arm64 r$REV" \
+            --notes "Verified Chromium Android Arm64 snapshot r$REV, version $VERSION. Source and cryptographic provenance are in manifest.txt."
+          gh release upload "$TAG" \
+            out/Chromium-ChromePublic.apk \
+            out/manifest.txt \
+            out/aapt-badging.txt \
+            out/apksigner-verify.txt \
+            --repo "$GITHUB_REPOSITORY"
